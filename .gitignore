@@ -1,0 +1,48 @@
+# =============================================================================
+# This working folder holds ~14 GB of experiment output and a pile of
+# experiment-specific analysis scripts. The published repository is only the
+# app: the pipeline, its two GUIs, and the docs needed to run them.
+#
+# So this is an allowlist. Ignore everything, then name exactly what ships.
+# Adding a file to the repo is a deliberate act of adding a line here, which is
+# what stops one-off analysis scripts and PhD write-ups drifting into a public
+# repo over time.
+# =============================================================================
+*
+
+!.gitignore
+!README.md
+!environment.yml
+!site.env.example
+
+# --- setup -------------------------------------------------------------------
+!bootstrap.sh
+!fetch_references.sh
+
+# --- the pipeline, stage by stage --------------------------------------------
+!annotate_plates.py
+!combine_plates.py
+!prepare_virus_matrix_v2.py
+!phipseq_rank_call_and_plot_v1.7.2.py
+!plot_genome.py
+!plot_provenance.py
+!plot_phipseq_seroprevalence.py
+
+# --- the GUIs and their launchers --------------------------------------------
+!phipseq_prepare_gui.py
+!phipseq_gui.py
+!run_phipseq_prepare_gui.sh
+!run_phipseq_gui.sh
+!run_phipseq_rank_call_and_plot_v1.7.2.sh
+
+# --- documentation -----------------------------------------------------------
+!HOW_TO_RUN.md
+!HOW_TO_RUN_prepare_virus_matrix_v2.md
+!HOW_TO_RUN_plot_genome.md
+!PROTOCOL_relabelling_any_library.md
+
+# --- never, whatever a rule above might admit --------------------------------
+# site.env holds this install's own hostname and paths.
+site.env
+__pycache__/
+*.pyc
