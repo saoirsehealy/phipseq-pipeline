@@ -11,6 +11,8 @@ and are not part of this repository.
 Input is a relabelled matrix from `prepare_virus_matrix_v2.py` — see
 `HOW_TO_RUN_prepare_virus_matrix_v2.md` for how to make one.
 
+> **Set this to your own path.** It is this install's, left here as a worked
+> example; every command below uses it.
 ```bash
 SCRIPTS="/datastore1/PROJECTS/PHIPSEQ/Saoirse_practice/emma_pipeline"
 ```

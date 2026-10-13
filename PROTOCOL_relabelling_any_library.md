@@ -6,9 +6,10 @@ blastp, genotype by tblastn) but blasts the **whole translated library**, so pep
 selection rests on the alignment rather than on how the library happened to name
 things.
 
-**Whole-library is the default in v2** — there is no flag to set. Supplying
-`--search-term` switches back to the old name-based extraction, which is kept only
-for comparison. (`--all-peptides` is accepted but does nothing; v1 required it.)
+**There is no default — one of the two modes is mandatory.** v2 exits with
+*"You must provide --search-term unless --sequence-search is being used"* if you give
+neither, and refuses both together. `--sequence-search` is the library-wide route;
+`--search-term` is the name-based one. Which to pick is covered below.
 
 Verified against v1 on both libraries: byte-identical relabelled CSV and FASTA for
 SARS-CoV-2 / RespScan and CCHFV M / OCCUSCAN.
@@ -43,14 +44,15 @@ minutes for OCCUSCAN (298,013 peptides) on a single core.
 | Coordinate reference | `--coord-ref` | protein FASTA; **any number of sequences** |
 | Coordinate map (multi-protein only) | `--coord-map` | TSV: `subject_id, label, genome_nt_start` |
 | Genotype reference | `--geno-ref` | nucleotide FASTA, **2 or more**; optional |
-| CPM matrix | `--cpm` | the matrix to relabel; optional |
+| CPM matrix | `--cpm` | the matrix to relabel; **required** |
 
 Libraries live in `/datastore1/PROJECTS/PHIPSEQ/Libraries/phipflow/Oligos/`:
 `RESPSCAN_`, `OCCUSCAN_full_`, `NOVOSCAN_full_`, `MICROSCAN_` + `_bowtieref_phipflow_translate.fasta`.
 
-`--annotation-table` (the run's own `data_peptide_annotation_table.csv`, oligo DNA)
-is equivalent — verified identical for all 298,013 OCCUSCAN and 99,766 RespScan
-peptides. Use it if you want the peptide set tied to one specific run.
+> v1 accepted `--annotation-table` (a run's own `data_peptide_annotation_table.csv`,
+> oligo DNA) as an alternative source of peptide sequences. **v2 removed it** — the
+> translated library passed to `--library` is the only source. If you hold DNA oligos
+> rather than a translated library, you must translate them first.
 
 ---
 
@@ -67,8 +69,8 @@ python3 prepare_virus_matrix_v2.py \
   --output <virus>_explore/<virus>_<seg>_relabelled.csv
 ```
 
-`--sequence-search` is what makes this the library-wide route; without it the
-script falls back to `--search-term`.
+`--sequence-search` is what makes this the library-wide route. There is no fallback:
+without it, and without `--search-term`, the script exits rather than guessing.
 
 This places every peptide that aligns full-length to your reference, at any identity.
 Do not use this matrix for analysis — it is the diagnostic run.
@@ -83,7 +85,8 @@ Do not use this matrix for analysis — it is the diagnostic run.
 python3 - <<'PY'
 import csv, numpy as np
 v = np.array([float(r['pident']) for r in
-              csv.DictReader(open('<virus>_explore/<virus>_<seg>_peptide_coords.tsv'),
+              # written automatically beside --output by every step-1 run
+              csv.DictReader(open('<your --output path, minus .csv>_peptide_coords.tsv'),
                              delimiter='\t')])
 print('n=%d  min %.1f  median %.1f' % (len(v), v.min(), np.median(v)))
 h, e = np.histogram(v, bins=np.arange(10, 101, 5))

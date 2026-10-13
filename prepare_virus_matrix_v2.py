@@ -69,6 +69,7 @@
 
 import argparse
 import re
+import shutil
 import subprocess
 import tempfile
 from pathlib import Path
@@ -1431,6 +1432,30 @@ def main():
             raise RuntimeError(
                 "No coordinate BLAST hits were found."
             )
+
+        # Keep the coordinate BLAST next to the output. It is the only record of
+        # the per-peptide identity distribution, and choosing --min-identity for
+        # a new virus means reading that distribution: PROTOCOL_relabelling_any
+        # _library.md documents exactly that procedure, against exactly this
+        # file. Until now it lived in a TemporaryDirectory and was deleted on
+        # exit, so the one step the docs call out as the thing people get wrong
+        # could not be performed at all.
+        coords_kept = Path(args.output).with_suffix("").as_posix() + "_peptide_coords.tsv"
+        # Written WITH a header, unlike BLAST's own outfmt 6, because the
+        # procedure in PROTOCOL step 2 reads it with csv.DictReader and asks for
+        # the 'pident' column by name.
+        coords_header = ("qseqid\tsseqid\tsstart\tsend\tpident\t"
+                         "length\tqlen\tqcovs\tbitscore\n")
+        try:
+            with open(coords_kept, "w") as kept:
+                kept.write(coords_header)
+                with open(coordinate_blast) as raw:
+                    shutil.copyfileobj(raw, kept)
+            print(f"\nCoordinate BLAST kept at: {coords_kept}")
+            print("  Use it to choose --min-identity for a new virus; see "
+                  "PROTOCOL_relabelling_any_library.md, step 2.")
+        except OSError as exc:
+            print(f"\nWarning: could not keep the coordinate BLAST ({exc}).")
 
         coordinate_hits = pd.read_csv(
             coordinate_blast,

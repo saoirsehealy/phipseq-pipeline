@@ -11,6 +11,8 @@ Emma's output exactly — all 3,840 peptide names character-for-character identi
 For **choosing an identity threshold**, see `PROTOCOL_relabelling_any_library.md`.
 This file is just how to drive the script.
 
+> **Set these two to your own paths.** They are this install's, left here as a
+> worked example; every command below uses them.
 ```bash
 SCRIPTS="/datastore1/PROJECTS/PHIPSEQ/Saoirse_practice/emma_pipeline"
 LIBS="/datastore1/PROJECTS/PHIPSEQ/Libraries/phipflow/Oligos"

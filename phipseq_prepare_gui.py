@@ -314,7 +314,8 @@ def check_install(sess):
         packages = found or [f"cannot run {sess.python}: "
                              f"{(out or 'not found').strip().splitlines()[-1][:160]}"]
 
-    binaries = [tool for tool in ("blastp", "tblastn", "makeblastdb")
+    # efetch too: stage 0 needs it, and bootstrap.sh checks the same four.
+    binaries = [tool for tool in ("blastp", "tblastn", "makeblastdb", "efetch")
                 if remote_run(sess, "command -v " + tool)[0] != 0]
     return scripts, packages, binaries
 

@@ -35,7 +35,11 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ENV_FILE="${SCRIPT_DIR}/environment.yml"
 ENV_NAME="phipseq"
 MODULES=(pandas numpy matplotlib scipy)
-BINARIES=(blastp tblastn makeblastdb)
+# efetch is stage 0 (fetch_references.sh). environment.yml provides it via
+# entrez-direct, so it belongs in the check: without it, a machine that
+# satisfies everything else was told "already satisfied" and then failed at
+# stage 0.
+BINARIES=(blastp tblastn makeblastdb efetch)
 
 MODE=create
 ASSUME_YES=no
@@ -66,7 +70,8 @@ satisfies() {
 import importlib, shutil, sys
 for m in ("pandas", "numpy", "matplotlib", "scipy"):
     importlib.import_module(m)
-missing = [b for b in ("blastp", "tblastn", "makeblastdb") if shutil.which(b) is None]
+missing = [b for b in ("blastp", "tblastn", "makeblastdb", "efetch")
+           if shutil.which(b) is None]
 sys.exit(1 if missing else 0)
 PYEOF
   return 0
@@ -83,7 +88,7 @@ for m in ("pandas", "numpy", "matplotlib", "scipy"):
         print(f"  {m:<11s} {getattr(mod, '__version__', 'present')}")
     except ImportError:
         print(f"  {m:<11s} MISSING")
-for b in ("blastp", "tblastn", "makeblastdb"):
+for b in ("blastp", "tblastn", "makeblastdb", "efetch"):
     path = shutil.which(b)
     print(f"  {b:<12s} {path or 'MISSING'}")
 PYEOF

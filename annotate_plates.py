@@ -104,7 +104,7 @@ def read_peptides(path):
                 f"peptide_id {seen[name]} and {pid}. The relabelling join would be "
                 f"ambiguous, so this must be fixed upstream.")
         seen[name] = pid
-    return peptides, oligos, has_oligo
+    return peptides, oligos, bool(oligo_col)
 
 
 def read_samples(path):

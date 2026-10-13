@@ -22,8 +22,9 @@ detail in `HOW_TO_RUN_prepare_virus_matrix_v2.md` and `HOW_TO_RUN_plot_genome.md
 ## Setup
 
 Needs pandas, numpy, matplotlib and scipy, plus BLAST+ and NCBI EDirect on
-`PATH`. `bootstrap.sh` checks for all of them and only downloads something if
-your machine is genuinely missing it:
+`PATH`. `bootstrap.sh` checks all of them — the four packages, `blastp`,
+`tblastn`, `makeblastdb` and `efetch` — and only downloads something if your
+machine is genuinely missing one:
 
 ```bash
 ./bootstrap.sh            # check, and create the 'phipseq' env if needed
@@ -32,6 +33,39 @@ your machine is genuinely missing it:
 
 It prints the interpreter path to use. No root required — everything installs
 into your own conda directory.
+
+## The browser GUI
+
+`phipseq_prepare_gui.py` chains stages 1-4 over SSH: you sign in to your analysis
+server with your own account, and every command is shown before it runs. It can also
+install this pipeline onto a server that does not have it yet, so a colleague needs
+only that one file.
+
+```bash
+pip install paramiko          # the only extra dependency, on the machine with the browser
+./run_phipseq_prepare_gui.sh 8770 --open
+```
+
+Reach it at <http://127.0.0.1:8770>. It binds to loopback and refuses credentials from
+anywhere else, because the browser hop is plain HTTP and would otherwise carry an
+account password. From another machine, tunnel:
+`ssh -L 8770:127.0.0.1:8770 <host-running-it>`.
+
+**Set your own defaults in `site.env`**, which is not tracked, so your hostname and
+paths stay local:
+
+```bash
+cp site.env.example site.env     # then edit
+```
+
+| Variable | What it is |
+|---|---|
+| `PHIPSEQ_SERVER` | hostname of the analysis server, e.g. `cluster.example.ac.uk`. No user, no port. Blank means type it each time. |
+| `PHIPSEQ_ROOT` | the directory a session is confined to. Must contain **both** your input data and where results go — paths outside it are refused, including your peptide library. Blank means the folder these scripts sit in. |
+| `PHIPSEQ_PYTHON` | interpreter on the server. `bootstrap.sh` prints the exact value to use. |
+| `PHIPSEQ_REPO` | git URL the GUI installs from. Point it at your own fork if you have one. |
+
+`phipseq_gui.py` is a second, simpler GUI covering stage 3 only, run locally.
 
 ## Bringing your own library
 
