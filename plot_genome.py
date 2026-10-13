@@ -94,6 +94,33 @@ ORF_COLOURS = ["#E8C33C", "#7B5EA7", "#7DC462", "#6E6E6E", "#E05C4B", "#1E7A46",
 
 TILE_RE = re.compile(r"^\d+-\d+(?:-\d+)?$")
 COORD_RE = re.compile(r"^(\d+(?:\.\d+)?)-(\d+(?:\.\d+)?)$")
+# Terminal tiles are labelled by position instead of a numeric range, and they
+# occupy TWO fields rather than one:
+#     ...|CTERM|STOP|cchfv|m|<genotype>|1630-1684
+#     ...|withGSlinker|CTERM|STOP-181449|cov2|E|NoGenotype|26329-26469
+# Matching only TILE_RE threw these away even though their coordinates parsed
+# cleanly, and they were then counted among the "no usable coordinates" drops.
+# That silently blanked the extreme C-terminus of every genome figure: 9
+# peptides on CCHFV M, 853 (7.3%) on SARS-CoV-2 -- the very tiles the stop-codon
+# strip in prepare_virus_matrix_v2.py exists to rescue.
+TERM_RE = re.compile(r"^[CN]TERM$")
+STOP_RE = re.compile(r"^STOP(?:-\d+)?$")
+
+
+def tile_span(parts):
+    """(index, width) of the tile field(s) in a split peptide name.
+
+    Width is 2 for the CTERM/NTERM form, because the ORF then sits one field
+    further along. Returns (None, 0) when no tile field can be found.
+    """
+    for i in range(len(parts) - 2, -1, -1):
+        part = parts[i].strip()
+        if TILE_RE.match(part):
+            return i, 1
+        if TERM_RE.match(part):
+            following = parts[i + 1].strip() if i + 1 < len(parts) else ""
+            return i, 2 if STOP_RE.match(following) else 1
+    return None, 0
 
 
 # ---------------------------------------------------------------- name parsing
@@ -106,15 +133,11 @@ def parse_names(names):
         if not m:
             orf.append(None); lo.append(np.nan); hi.append(np.nan); continue
 
-        tile = None
-        for i in range(len(parts) - 2, -1, -1):
-            if TILE_RE.match(parts[i].strip()):
-                tile = i
-                break
-        if tile is None or tile + 2 > len(parts) - 2:
+        tile, width = tile_span(parts)
+        if tile is None or tile + width + 1 > len(parts) - 2:
             orf.append(None); lo.append(np.nan); hi.append(np.nan); continue
 
-        orf.append(parts[tile + 2].strip())
+        orf.append(parts[tile + width + 1].strip())
         lo.append(float(m.group(1))); hi.append(float(m.group(2)))
     idx = names.index
     return (pd.Series(orf, index=idx, dtype=object),

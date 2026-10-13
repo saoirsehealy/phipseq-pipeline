@@ -5,6 +5,7 @@
 #   ./bootstrap.sh              # check; create the env only if something is missing
 #   ./bootstrap.sh --check      # check and report, change nothing
 #   ./bootstrap.sh --force      # recreate the environment even if it looks fine
+#   ./bootstrap.sh --yes        # never prompt; accept installing conda if absent
 #
 # Safe to re-run. It never touches a working install, and it never needs root:
 # everything lands inside your own conda installation.
@@ -37,12 +38,19 @@ MODULES=(pandas numpy matplotlib scipy)
 BINARIES=(blastp tblastn makeblastdb)
 
 MODE=create
-case "${1:-}" in
-  --check) MODE=check ;;
-  --force) MODE=force ;;
-  "") ;;
-  *) echo "unknown option: $1 (expected --check, --force, or nothing)" >&2; exit 2 ;;
-esac
+ASSUME_YES=no
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --check) MODE=check ;;
+    --force) MODE=force ;;
+    # Needed by anything driving this without a terminal, such as the GUI,
+    # which opens an SSH exec channel and sends no stdin at all: the prompt
+    # below could never be answered there and the run would always fail.
+    --yes|-y) ASSUME_YES=yes ;;
+    *) echo "unknown option: $1 (expected --check, --force, --yes)" >&2; exit 2 ;;
+  esac
+  shift
+done
 
 say()  { printf '%s\n' "$*"; }
 head2() { printf '\n== %s ==\n' "$*"; }
@@ -112,6 +120,10 @@ if [ -n "$FOUND" ] && [ "$MODE" != force ]; then
   say ""
   say "Paste this into the GUI's \"Python to run them with\" field:"
   say "    $FOUND"
+  # Machine-readable, for the GUI to pick up. Must stay unambiguous: the
+  # candidate lines above also end in a python path, so anything matching on
+  # the path alone would adopt a REJECTED interpreter.
+  say "PHIPSEQ_PYTHON=$FOUND"
   exit 0
 fi
 
@@ -129,12 +141,24 @@ head2 "Creating the '${ENV_NAME}' environment"
 if ! command -v conda >/dev/null 2>&1; then
   say "No conda on this machine. Installing Miniforge into ~/miniforge3"
   say "(about 400 MB once the environment is built; no root required)."
-  printf '  continue? [y/N] '
-  read -r reply
-  case "$reply" in
-    [yY]*) ;;
-    *) say "Stopped. Install conda yourself, then re-run this script."; exit 1 ;;
-  esac
+  if [[ "$ASSUME_YES" == yes ]]; then
+    say "  proceeding (--yes)"
+  elif [[ -t 0 ]]; then
+    printf '  continue? [y/N] '
+    read -r reply
+    case "$reply" in
+      [yY]*) ;;
+      *) say "Stopped. Install conda yourself, then re-run this script."; exit 1 ;;
+    esac
+  else
+    # No terminal and no --yes: say so plainly rather than block on a read
+    # that can never be satisfied.
+    say ""
+    say "Nothing is attached to answer that question (no terminal), so stopping"
+    say "here rather than installing 400 MB unasked. Re-run with --yes to accept,"
+    say "or install conda yourself and run this again."
+    exit 1
+  fi
   TMP_INSTALLER="$(mktemp -t miniforge-XXXXXX.sh)"
   trap 'rm -f "$TMP_INSTALLER"' EXIT
   URL="https://github.com/conda-forge/miniforge/releases/latest/download/Miniforge3-$(uname)-$(uname -m).sh"
@@ -170,6 +194,7 @@ if satisfies "$ENV_PY"; then
   say ""
   say "Done. Paste this into the GUI's \"Python to run them with\" field:"
   say "    $ENV_PY"
+  say "PHIPSEQ_PYTHON=$ENV_PY"
   say ""
   say "For a shell instead:  conda activate ${ENV_NAME}"
 else

@@ -248,7 +248,52 @@ def ssh_connect(host, port, user, password):
 
 REQUIRED_SCRIPTS = ("prepare_virus_matrix_v2.py",
                     "phipseq_rank_call_and_plot_v1.7.2.py",
-                    "plot_genome.py")
+                    "plot_genome.py",
+                    # The Dependencies card runs this one. Without it here, a
+                    # bare server showed both cards, and pressing Dependencies
+                    # first ran a non-existent script, read the 127 as "things
+                    # are missing", and offered to download roughly 1 GB.
+                    "bootstrap.sh")
+
+
+def installed_version(sess):
+    """(short commit, subject, behind-count) for the checkout on the server.
+
+    behind is how many commits origin has that this install does not, or None
+    when it cannot be determined -- no git checkout, no network, no remote.
+    Fetching is read-only, so this never changes the server's files.
+    """
+    d = shlex.quote(sess.pipeline_dir)
+    st, out = remote_run(sess, f"git -C {d} log -1 --format=%h%x09%s 2>/dev/null")
+    if st != 0 or not out.strip():
+        return None, None, None
+    short, _, subject = out.strip().partition("\t")
+    behind = None
+    st, out = remote_run(sess, f"git -C {d} fetch --quiet origin 2>/dev/null && "
+                               f"git -C {d} rev-list --count HEAD..@{{u}} 2>/dev/null",
+                         # Short, because this runs on every page load and a
+                         # server with no outbound network must not hang it.
+                         timeout=45)
+    if st == 0 and out.strip().isdigit():
+        behind = int(out.strip())
+    return short, subject.strip(), behind
+
+
+def expand_home(sess, path):
+    """Resolve a leading ~ against the server's own $HOME.
+
+    shlex.quote() quotes the tilde, so the shell never expands it and a path
+    like ~/miniconda3/envs/phipseq/bin/python -- which the login page suggests
+    -- failed with "No such file or directory" and parked the person on the
+    setup page with no way out but signing in again.
+    """
+    if not path.startswith("~"):
+        return path
+    # Trailing newline on purpose: without it the value can be glued onto a
+    # preceding line of shell noise and then filtered away with it.
+    status, out = remote_run(sess, "printf '%s\\n' \"$HOME\"")
+    home = out.strip().splitlines()[-1].strip() if status == 0 and out.strip() else ""
+    return home + path[1:] if home else path
 
 
 def check_install(sess):
@@ -274,12 +319,50 @@ def check_install(sess):
     return scripts, packages, binaries
 
 
+# An SSH exec channel gets a NON-interactive, NON-login shell, which on a
+# typical cluster is not the environment the person sees when they log in. Here
+# the /software/* tool paths come from /etc/bash.bashrc and the conda python
+# from ~/.bashrc, and both are skipped: /etc/bash.bashrc is only read by
+# interactive shells, and ~/.bashrc returns immediately when not interactive.
+# The result is that blastp, tblastn, makeblastdb and the real python3 all
+# appear to be missing, and stage two would fail even once past the checks.
+#
+# So every remote command runs through an interactive shell, which reproduces
+# the PATH the person actually has. The cost is two lines of job-control
+# grumbling on a channel with no tty, which are filtered out below.
+NOISE = ("cannot set terminal process group",
+         "no job control in this shell")
+
+
+def sanitize_prefix(name):
+    """Mirror sanitize_name() in phipseq_rank_call_and_plot_v1.7.2.py.
+
+    Kept deliberately identical, because the panel filename stage four reads is
+    built from stage three's version of this.
+    """
+    return re.sub(r"[^A-Za-z0-9._-]+", "_", name.strip().lower())
+
+
+def login_shell(command):
+    """Wrap a command so it runs with the person's real login environment."""
+    # -l reads /etc/profile and /etc/profile.d/*.sh (where most module-based
+    # clusters set tool paths); -i reads /etc/bash.bashrc and ~/.bashrc (where
+    # this one does, plus conda). Both are needed, and -i alone was not the
+    # "login environment" this docstring claimed.
+    return "bash -lic " + shlex.quote(command)
+
+
+def strip_noise(text):
+    return "".join(line + "\n" for line in text.splitlines()
+                   if not any(n in line for n in NOISE)).rstrip("\n")
+
+
 def remote_run(sess, command, timeout=60):
     """Run a short command, return (exit_status, combined output)."""
     chan = sess.client.get_transport().open_session(timeout=timeout)
     chan.settimeout(timeout)
     chan.set_combine_stderr(True)
-    chan.exec_command(command)
+    chan.exec_command(login_shell(command))
     out = []
     try:
         while True:
@@ -291,14 +374,17 @@ def remote_run(sess, command, timeout=60):
         out.append("\n[timed out]")
     status = chan.recv_exit_status()
     chan.close()
-    return status, "".join(out)
+    return status, strip_noise("".join(out))
 
 
-def safe_remote(sess, raw, must_exist=True, want_dir=False):
+def safe_remote(sess, raw, must_exist=True, want_dir=False, field=""):
     """Normalise a remote path ON THE SERVER and refuse anything outside root."""
     text = (raw or "").strip()
     if not text:
-        raise FormError("A required path was left blank.")
+        # Naming the field matters: this message was identical for every
+        # required path, so a blank one gave no clue which box to fill.
+        raise FormError(f"{field} was left blank." if field
+                        else "A required path was left blank.")
     candidate = text if text.startswith("/") else posixpath.join(sess.root, text)
     candidate = posixpath.normpath(candidate)
     sftp = sess.sftp()
@@ -396,7 +482,9 @@ def build_commands(sess, form):
         cpm = posixpath.join(combined_dir, "data_cpm_final_annotated.csv")
     else:
         cpm = safe_remote(sess, form.get("cpm"))
-    sequence_source = ["--library", safe_remote(sess, form.get("library"))]
+    sequence_source = ["--library",
+                       safe_remote(sess, form.get("library"),
+                                   field="The translated peptide library")]
 
     segment = (form.get("segment") or "").strip()
     if segment and not re.fullmatch(r"[A-Za-z0-9._-]+", segment):
@@ -436,6 +524,14 @@ def build_commands(sess, form):
 
     steps.append(("Prepare virus matrix", prep, out_dir))
     if not form.get("run_pipeline"):
+        # Genome plots need the panel stage three selects, so asking for them
+        # without it cannot be honoured. Saying so beats silently dropping the
+        # request, which is what happened before -- the run simply ended early
+        # with no plots and no explanation.
+        if form.get("run_genome"):
+            raise FormError("Genome plots need the ranking pipeline, because they "
+                            "mark the panel it selects. Tick 'Run the ranking "
+                            "pipeline', or untick genome plots.")
         return steps, out_dir, matrix
 
     run_dir = safe_remote(sess, form.get("run_dir") or posixpath.join(out_dir, "run"),
@@ -467,7 +563,11 @@ def build_commands(sess, form):
              else ["--no-collapse-by-location-max"])
     extra = (form.get("extra_args") or "").strip()
     if extra:
-        tokens = shlex.split(extra)
+        try:
+            tokens = shlex.split(extra)
+        except ValueError as exc:
+            raise FormError(f"Could not read the extra arguments: {exc}. "
+                            "Check the quotes are balanced.") from exc
         if tokens and not tokens[0].startswith("-"):
             raise FormError(f"'{tokens[0]}' is not a flag — pipeline arguments start with '-'.")
         pipe += tokens
@@ -503,7 +603,14 @@ def build_commands(sess, form):
 
     plot = [sess.python, "-u", genome,
             "--matrix", matrix,
-            "--panel", posixpath.join(run_dir, f"{out_prefix}_selected_panel.txt"),
+            # Stage three names the panel after its OWN sanitised prefix, which
+            # is lowercased (sanitize_name in phipseq_rank_call_and_plot). Using
+            # the raw form value here produced a path stage three never wrote,
+            # and plot_genome.py skips a missing --panel silently: the run
+            # reported success and quietly omitted the panel view and its
+            # triangle markers. Normalise the same way.
+            "--panel", posixpath.join(
+                run_dir, f"{sanitize_prefix(out_prefix)}_selected_panel.txt"),
             "--out-dir", plots_dir,
             "--virus", virus + (f" {segment}" if segment else ""),
             "--coordinate-level", "nt" if form.get("coord_map") else "aa",
@@ -551,7 +658,9 @@ def execute(sess, steps, matrix):
                      + " ".join(shlex.quote(part) for part in cmd))
             chan = sess.client.get_transport().open_session()
             chan.set_combine_stderr(True)
-            chan.exec_command(shell)
+            # Same interactive wrap: stage two shells out to blastp, which is
+            # only on PATH in the person's real login environment.
+            chan.exec_command(login_shell(shell))
             # The pipeline asks a few questions with no command-line flag: 'y'
             # answers "do you have true negative controls", then blank lines
             # accept each printed default.
@@ -569,6 +678,12 @@ def execute(sess, steps, matrix):
                     buffer += chunk
                     while "\n" in buffer:
                         line, buffer = buffer.split("\n", 1)
+                        # The interactive wrap emits two job-control lines on a
+                        # channel with no tty. remote_run filters them; this
+                        # streaming path did not, so they showed up in the live
+                        # log of every step.
+                        if any(n in line for n in NOISE):
+                            continue
                         sess.add(line)
                 elif chan.exit_status_ready():
                     break
@@ -601,7 +716,7 @@ MARK = '<svg width="26" height="26" viewBox="0 0 26 26" aria-hidden="true"><rect
 SCRIPT = '<script>\nconst $=s=>document.querySelector(s), $$=s=>[...document.querySelectorAll(s)];\n\nfunction syncPipe(){ $("#pipeBox").style.display=$("#run_pipeline").checked?"":"none"; mark(); }\nfunction syncAnn(){ const on=$("#run_annotate").checked;\n  $("#annBox").style.display=on?"":"none";\n  $("#cpmField").style.display=on?"none":"";\n  $("#seqNote").style.display=on?"":"none"; mark(); }\n$("#run_pipeline").addEventListener("change",syncPipe);\n$("#run_annotate").addEventListener("change",syncAnn);\n\n/* the three artefacts across the top, lit as the run advances */\nfunction mark(state){\n  const ann=$("#run_annotate").checked, pipe=$("#run_pipeline").checked;\n  const sp=$$("#flow .sp");\n  sp[0].dataset.state = state&&state[0] ? state[0] : (ann?"idle":"skip");\n  sp[1].dataset.state = state&&state[1] ? state[1] : "idle";\n  sp[2].dataset.state = state&&state[2] ? state[2] : (pipe?"idle":"skip");\n}\n\n/* ---- path picker ---------------------------------------------------- */\nlet pt=null, pk="file", cwd="";\ndocument.addEventListener("click",async e=>{\n  const b=e.target.closest("button.pick[data-target]"); if(!b) return;\n  pt=b.dataset.target; pk=b.dataset.kind; cwd=document.getElementById(pt).value||"";\n  $("#picker").style.display="grid"; await hop(); });\n$("#pickClose").onclick=()=>{ $("#picker").style.display="none"; };\n$("#picker").addEventListener("click",e=>{ if(e.target===$("#picker")) $("#picker").style.display="none"; });\n$("#pickUse").onclick=()=>{ document.getElementById(pt).value=cwd; $("#picker").style.display="none"; };\ndocument.addEventListener("keydown",e=>{ if(e.key==="Escape") $("#picker").style.display="none"; });\nfunction size(n){ if(n===null||n===undefined) return "";\n  const u=["B","K","M","G"]; let i=0,v=Number(n);\n  while(v>=1024&&i<3){v/=1024;i++;} return v.toFixed(v<10&&i>0?1:0)+u[i]; }\nasync function hop(){\n  const j=await (await fetch("/browse?path="+encodeURIComponent(cwd))).json();\n  if(j.error){ $("#pickList").innerHTML="<div class=\'item\'><span class=\'t\'>"+j.error+"</span></div>"; return; }\n  cwd=j.path; $("#pickPath").textContent=j.path;\n  let h="";\n  if(j.parent!==null) h+="<div class=\'item d\' data-go=\'"+j.parent+"\'><span class=\'g\'>\\u2191</span><span class=\'t\'>up one level</span></div>";\n  for(const it of j.entries){\n    if(it.dir) h+="<div class=\'item d\' data-go=\'"+j.path+"/"+it.name+"\'><span class=\'g\'>\\u25b8</span><span class=\'t\'>"+it.name+"</span></div>";\n    else if(pk==="file") h+="<div class=\'item\' data-use=\'"+j.path+"/"+it.name+"\'><span class=\'g\'>\\u00b7</span><span class=\'t\'>"+it.name+"</span><span class=\'s\'>"+size(it.size)+"</span></div>";\n  }\n  $("#pickList").innerHTML=h||"<div class=\'item\'><span class=\'t\'>nothing here</span></div>"; }\n$("#pickList").addEventListener("click",async e=>{\n  const t=e.target.closest("[data-go],[data-use]"); if(!t) return;\n  if(t.dataset.go!==undefined){ cwd=t.dataset.go; await hop(); }\n  else { document.getElementById(pt).value=t.dataset.use; $("#picker").style.display="none"; } });\n\n/* ---- log ------------------------------------------------------------ */\nlet seen=0, timer=null, t0=null, stick=true;\nconst RX=/^=== Step (\\d+)\\/(\\d+):/;\nfunction tint(line){\n  const e=document.createElement("span"); let c="";\n  if(/^=== Step/.test(line)) c="c";\n  else if(/ERROR|failed with exit code/i.test(line)) c="r";\n  else if(/Step \\d+ finished|^\\s*Wrote |identical|\\bok\\b/.test(line)) c="g";\n  else if(/^Warning:|WARNING/i.test(line)) c="y";\n  e.className=c; e.textContent=line+"\\n"; return e; }\nfunction clock(){ if(!t0) return "";\n  const s=Math.floor((Date.now()-t0)/1000);\n  return String(Math.floor(s/60)).padStart(2,"0")+":"+String(s%60).padStart(2,"0"); }\nconst tap=$("#log");\ntap.addEventListener("scroll",()=>{ stick=tap.scrollTop+tap.clientHeight>=tap.scrollHeight-24; });\nfunction say(kind,text){ const p=$("#statusPill");\n  p.className="state"+(kind?" "+kind:""); p.lastChild.textContent=text; }\nasync function poll(){\n  const j=await (await fetch("/log?since="+seen)).json();\n  if(j.lines.length){\n    if(seen===0) tap.textContent="";\n    const frag=document.createDocumentFragment();\n    for(const l of j.lines){\n      const m=RX.exec(l);\n      if(m){ const cur=parseInt(m[1],10), off=$("#run_annotate").checked?0:1;\n        const st=["idle","idle","idle"];\n        for(let i=0;i<cur-1;i++) st[i+off]="done";\n        st[cur-1+off]="active"; mark(st); }\n      frag.appendChild(tint(l));\n    }\n    tap.appendChild(frag);\n    if(stick) tap.scrollTop=tap.scrollHeight;\n  }\n  seen=j.total;\n  $("#el").textContent=clock();\n  if(j.running) say("run","working");\n  if(j.done){\n    clearInterval(timer); timer=null;\n    say(j.failed?"bad":"ok", j.failed?"stopped":"finished");\n    mark($$("#flow .sp").map(x=>x.dataset.state==="active"?(j.failed?"fail":"done"):x.dataset.state));\n    const o=await (await fetch("/outputs")).json();\n    if(o.files&&o.files.length){\n      let h="<h3 class=\'cut\'>What it made</h3><div class=\'shelf\'>";\n      for(const f of o.files){\n        const u="/file?p="+encodeURIComponent(f), nm=f.split("/").pop();\n        h+="<a href=\'"+u+"\' target=\'_blank\'><div class=\'pic\'>"\n          +(/\\.png$/i.test(f)?"<img loading=\'lazy\' src=\'"+u+"\' alt=\'\'>":"<span>"+(nm.split(".").pop()||"file")+"</span>")\n          +"</div><div class=\'cap\'>"+nm+"</div></a>";\n      }\n      $("#outputs").innerHTML=h+"</div>";\n    }\n  }\n}\nsyncAnn(); syncPipe();\nif(new URLSearchParams(location.search).get("started")){\n  seen=0; t0=Date.now(); say("run","working");\n  timer=setInterval(poll,1100); poll();\n  setInterval(()=>{ if(timer) $("#el").textContent=clock(); },1000);\n}\n</script>'
 
 
-def page_setup(sess, scripts, packages, binaries, log=""):
+def page_setup(sess, scripts, packages, binaries, log="", confirm=""):
     """Shown when the server is missing scripts or dependencies.
 
     Everything here runs on the person's own server over the SSH connection
@@ -623,12 +738,34 @@ def page_setup(sess, scripts, packages, binaries, log=""):
             Install the scripts</button>
         </form>
       </div>""")
-    if packages or binaries:
+    # While the scripts are missing there is no bootstrap.sh to run, so the
+    # only honest next step is installing them.
+    if (packages or binaries) and not scripts:
         want = []
         if packages:
             want.append("Python packages: " + ", ".join(packages))
         if binaries:
             want.append("not on PATH: " + ", ".join(binaries))
+        boot = posixpath.join(sess.pipeline_dir, "bootstrap.sh")
+        if confirm:
+            # Second step. The first click only ran the read-only check; this is
+            # where something actually gets downloaded, so it is asked for
+            # explicitly and the message says what and where.
+            boot_cmd = f"bash {boot} --yes"
+            ask = (f'<div class="tell warn">{html.escape(confirm)}</div>'
+                   '<form method="post" action="/setup/env">'
+                   '<input type="hidden" name="confirm" value="1">'
+                   '<button class="go" type="submit">Yes, install it</button></form>'
+                   '<form method="get" action="/setup" style="margin-top:8px">'
+                   '<button class="go mute" type="submit">Cancel</button></form>')
+        else:
+            boot_cmd = f"bash {boot} --check"
+            ask = ('<p class="hint">This first checks what is already here and '
+                   'downloads nothing. If something really is missing it will say '
+                   'what it wants to install and ask before starting.</p>'
+                   '<form method="post" action="/setup/env">'
+                   '<button class="go" type="submit">Set up the dependencies</button>'
+                   '</form>')
         rows.append(f"""
       <div class="sheet" style="margin-bottom:16px">
         <h2>Dependencies</h2>
@@ -638,12 +775,44 @@ def page_setup(sess, scripts, packages, binaries, log=""):
            It needs no root: everything lands in your own conda directory, about
            1&nbsp;GB. On a cluster, run this on a login node &mdash; compute nodes
            often have no outbound network.</p>
-        <pre class="cmd">{html.escape(posixpath.join(sess.pipeline_dir, 'bootstrap.sh'))}</pre>
-        <form method="post" action="/setup/env">
-          <button class="go" type="submit">Set up the dependencies</button>
+        <pre class="cmd">{html.escape(boot_cmd)}</pre>
+        {ask}
+      </div>""")
+    # Version and update, shown whether or not anything is missing: the point of
+    # installing from a repository is being able to pull later fixes, and an
+    # install that is already working is exactly the one with no other way to.
+    short, subject, behind = installed_version(sess)
+    if short:
+        if behind:
+            state = (f"<b>{behind} update{'s' if behind > 1 else ''} available.</b> "
+                     f"This server is on {html.escape(short)} "
+                     f"&mdash; {html.escape(subject or '')}")
+            button = "Update the scripts"
+        elif behind == 0:
+            state = (f"Up to date, on {html.escape(short)} "
+                     f"&mdash; {html.escape(subject or '')}")
+            button = "Check again"
+        else:
+            state = (f"On {html.escape(short)} &mdash; {html.escape(subject or '')}. "
+                     f"Could not reach the remote to compare, so there may be newer work.")
+            button = "Try to update"
+        rows.append(f"""
+      <div class="sheet" style="margin-bottom:16px">
+        <h2>Version</h2>
+        <p class="say">{state}</p>
+        <form method="post" action="/setup/scripts">
+          <button class="go mute" type="submit">{button}</button>
         </form>
       </div>""")
-    if not rows:
+    elif not scripts:
+        rows.append(f"""
+      <div class="sheet" style="margin-bottom:16px">
+        <h2>Version</h2>
+        <p class="say">The scripts are present but
+           <code>{html.escape(sess.pipeline_dir)}</code> is not a git checkout, so
+           updates cannot be pulled. That is normal for an install copied by hand.</p>
+      </div>""")
+    if not (scripts or packages or binaries):
         rows.append("""
       <div class="sheet" style="margin-bottom:16px">
         <h2>Ready</h2>
@@ -973,6 +1142,9 @@ def page_main(sess, error=""):
   <div class="whoami"><b>{html.escape(sess.user)}</b> on {html.escape(sess.host)}<br>
     {html.escape(sess.root)}</div>
   <span class="state" id="statusPill"><i></i><span>ready</span></span>
+  <form method="get" action="/setup" style="margin:0">
+    <button class="go mute" type="submit" title="Version, updates and dependencies"
+            >Scripts</button></form>
   <form method="post" action="/logout" style="margin:0">
     <button class="go mute" type="submit">Sign out</button></form>
 </div></div>
@@ -1042,7 +1214,7 @@ def page_main(sess, error=""):
       such as RESPSCAN: the whole library is aligned to the reference and whatever matches
       is taken as your virus. Clear the search term when you do. Aligning to a reference is
       not proof of identity, so set a minimum identity below.</span></span></label>
-    <div id="cpmField" class="cols">{field("cpm")}{field("library")}</div>
+    <div class="cols"><div id="cpmField">{field("cpm")}</div>{field("library")}</div>
     <details class="more"><summary>Coordinates, genotyping and alignment settings</summary><div>
      <div class="cols">
       {field("coord_map")}
@@ -1354,6 +1526,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(page_login(f"root directory not found: {root}"),
                                   HTTPStatus.BAD_REQUEST)
             sess.repo = (form.get("repo") or "").strip()
+            # Do this after the connection exists, since it asks the server.
+            sess.python = expand_home(sess, sess.python)
             # Everything else -- scripts, packages, BLAST -- is fixable from
             # here, so we admit the session and route to the setup page rather
             # than refusing the login and leaving the person nowhere.
@@ -1369,7 +1543,11 @@ class Handler(BaseHTTPRequestHandler):
         if path.startswith("/setup"):
             sess = get_session(self._token())
             if sess is None:
-                return self._redirect("/")
+                # Sessions live in memory, so restarting the server drops them.
+                # A bare redirect looked like the button did nothing at all.
+                return self._send(page_login(
+                    "That session has expired -- the server was restarted, or it "
+                    "was idle too long. Sign in again."), HTTPStatus.UNAUTHORIZED)
             log = ""
             if path == "/setup/scripts":
                 if not sess.repo:
@@ -1387,24 +1565,47 @@ class Handler(BaseHTTPRequestHandler):
                     log = f"$ {cmd}\n\n{log}\n[exit {status}]"
             elif path == "/setup/env":
                 boot = shlex.quote(posixpath.join(sess.pipeline_dir, "bootstrap.sh"))
-                print(f"[setup] {sess.user}@{sess.host}: bootstrapping", flush=True)
-                # --check first: it is read-only and usually finds an interpreter
-                # that already works, which costs nothing and downloads nothing.
-                status, log = remote_run(sess, f"bash {boot} --check", timeout=120)
-                if status != 0:
-                    status, more = remote_run(sess, f"bash {boot} </dev/null", timeout=1800)
-                    log = f"{log}\n{more}"
-                log = f"$ bash {boot}\n\n{log}\n[exit {status}]"
+                if not form.get("confirm"):
+                    # First click: read-only. It usually finds an interpreter that
+                    # already works, in which case nothing is downloaded at all.
+                    status, log = remote_run(sess, f"bash {boot} --check", timeout=120)
+                    log = f"$ bash {boot} --check\n\n{log}\n[exit {status}]"
+                    if status != 0:
+                        # Something really is missing, so ask before downloading.
+                        scripts, packages, binaries = check_install(sess)
+                        note = ("Nothing here satisfies the pipeline, so an "
+                                "environment has to be built. That downloads "
+                                "roughly 1 GB into your own conda directory on "
+                                f"{sess.host} and takes several minutes. Nothing "
+                                "outside your account is touched and no root is "
+                                "needed.")
+                        print(f"[setup] {sess.user}@{sess.host}: asking to install",
+                              flush=True)
+                        return self._send(page_setup(sess, scripts, packages,
+                                                     binaries, log, confirm=note))
+                else:
+                    # Confirmed. --yes because this channel sends no stdin, so the
+                    # script's own prompt could never be answered.
+                    print(f"[setup] {sess.user}@{sess.host}: installing", flush=True)
+                    status, log = remote_run(sess, f"bash {boot} --yes", timeout=3600)
+                    log = f"$ bash {boot} --yes\n\n{log}\n[exit {status}]"
                 # bootstrap prints the interpreter it settled on; adopt it so the
                 # person does not have to copy it back into the form by hand.
-                for line in reversed(log.splitlines()):
-                    cand = line.strip()
-                    if cand.endswith("/bin/python") or cand.endswith("/bin/python3"):
-                        sess.python = cand
-                        log += f"\n\nUsing interpreter: {cand}"
-                        break
+                # Match only the explicit PHIPSEQ_PYTHON= marker: bootstrap also
+                # prints its REJECTED candidates as "  no  : /usr/bin/python3",
+                # and matching on the path alone adopted that whole line,
+                # prefix included, as the interpreter.
+                found = re.findall(r"^PHIPSEQ_PYTHON=(\S+)$", log, re.M)
+                if found:
+                    sess.python = found[-1]
+                    log += f"\n\nUsing interpreter: {sess.python}"
             scripts, packages, binaries = check_install(sess)
-            if not (scripts or packages or binaries) and not log:
+            if not (scripts or packages or binaries):
+                # Everything is in place now, so go to the run page. Keeping the
+                # person here to admire the log was a dead end: the output read
+                # as "nothing happened" and there was nothing obvious to press.
+                # The log is on the server console if it is ever needed.
+                print(f"[setup] {sess.user}@{sess.host}: ready\n{log}", flush=True)
                 return self._redirect("/")
             return self._send(page_setup(sess, scripts, packages, binaries, log))
 
